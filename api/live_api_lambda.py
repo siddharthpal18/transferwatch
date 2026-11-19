@@ -10,6 +10,8 @@ For each bus it returns:
   - expected time (live prediction, delay carried forward, or schedule)
   - tracking status: live GPS / last seen N min ago / not tracking
   - state: running, cancelled, or skipping this stop
+  - history: how this exact trip did at this stop over the last 28 days
+    (from the nightly drt-history job), and a likely arrival range
 plus the service alerts that affect this stop or its routes.
 
 No layers or packages needed: the GTFS-Realtime decoder below uses only the
@@ -46,6 +48,13 @@ GONE_AFTER = 60          # hide a bus 1 min after its expected time
 LIVE_GPS = 120           # GPS update within 2 min = live
 STALE_GPS = 600          # within 10 min = "last seen N min ago"
 MAX_RESULTS = 15
+MIN_RANGE_SAMPLES = 5    # need this many past arrivals before showing a range
+LEAD_BUCKETS = [("0-2", 0, 120), ("2-5", 120, 300), ("5-10", 300, 600),
+                ("10-20", 600, 1200), ("20-40", 1200, 2400)]
+STAT_FIELDS = ["days", "tracked", "cancelled", "skipped", "observed",
+               "delay_p10", "delay_med", "delay_p90", "early", "late5", "gps_lead",
+               "on_time", "quantiles"]
+MIN_PROB_DAYS = 5        # need this many days of a trip before showing its probabilities
 
 STOP_RE = re.compile(r"^[A-Za-z0-9_\-:.]{1,40}$")
 TRIP_CANCELLED = {3, 7}  # CANCELED, DELETED
@@ -309,6 +318,7 @@ def service_day_start(d):
 _s3 = None
 _static = {"loaded_at": 0}
 _stop_cache = {}
+_stats_cache = {}
 _feed_cache = {}
 
 
@@ -317,13 +327,18 @@ class NotFound(Exception):
 
 
 def read_static(key):
+    """Read one schedule file from S3's static/ folder."""
+    return read_json(STATIC_PREFIX + key)
+
+
+def read_json(key):
     """Read one JSON file from S3 (replaced in local tests)."""
     global _s3
     import boto3
     if _s3 is None:
         _s3 = boto3.client("s3")
     try:
-        obj = _s3.get_object(Bucket=BUCKET, Key=STATIC_PREFIX + key)
+        obj = _s3.get_object(Bucket=BUCKET, Key=key)
     except _s3.exceptions.NoSuchKey:
         raise NotFound(key)
     except Exception as e:  # AccessDenied is returned for missing keys without ListBucket
@@ -338,9 +353,26 @@ def load_static(now):
         _static["calendar"] = read_static("calendar.json")
         _static["routes"] = read_static("routes.json")
         _static.pop("trips", None)       # loaded lazily, only if needed
+        try:
+            _static["route_stats"] = read_json("stats/routes.json")
+        except NotFound:
+            _static["route_stats"] = {"days": 0, "routes": {}}
         _stop_cache.clear()
+        _stats_cache.clear()
         _static["loaded_at"] = now
     return _static
+
+
+def load_stop_stats(stop_id):
+    """28-day history for this stop's trips; empty until the nightly job has run."""
+    if stop_id not in _stats_cache:
+        if len(_stats_cache) > 300:
+            _stats_cache.clear()
+        try:
+            _stats_cache[stop_id] = read_json(f"stats/stops/{stop_id.replace('/', '_')}.json")
+        except NotFound:
+            _stats_cache[stop_id] = {"days": 0, "trips": {}}
+    return _stats_cache[stop_id]
 
 
 def load_trips():
@@ -399,8 +431,62 @@ def scheduled_trips(stop, calendar, now):
                 old = found.get(trip_id)
                 if old is None or abs(ts - now) < abs(old["sched"] - now):
                     found[trip_id] = {"trip_id": trip_id, "sched": int(ts), "seq": seq,
-                                      "route_id": route_id, "headsign": headsign}
+                                      "route_id": route_id, "headsign": headsign,
+                                      "key": trip_key(route_id, headsign, secs, d)}
     return list(found.values())
+
+
+def trip_key(route_id, headsign, secs, d):
+    """Same format as the nightly job: identifies 'the same bus' across days."""
+    dt = "wk" if d.weekday() < 5 else ("sa" if d.weekday() == 5 else "su")
+    return f"{route_id}|{headsign}|{secs // 3600:02d}:{secs % 3600 // 60:02d}|{dt}"
+
+
+def history_for(key, stop_stats):
+    row = stop_stats.get("trips", {}).get(key) if key else None
+    return dict(zip(STAT_FIELDS, row)) if row else None
+
+
+def arrival_distribution(entry, hist, route_stats, now):
+    """
+    How the arrival time is spread out, from past data: a base time plus 19 offsets
+    (5%, 10% ... 95% quantiles, in seconds). The website turns this into
+    "leave by 7:31 for a 90% chance" using the rider's walking time.
+      - live prediction: base = predicted time, spread = how wrong this route's
+        countdowns were at the same distance ahead
+      - schedule only:   base = timetable time, spread = this trip's own past delays
+    """
+    if entry["source"] == "realtime" and entry["expected"]:
+        lead = entry["expected"] - now
+        bucket = next((b for b, lo, hi in LEAD_BUCKETS if lo <= lead < hi), None)
+        routes = route_stats.get("routes", {})
+        band = (routes.get(entry["route_id"], {}).get(bucket)
+                or routes.get("_all", {}).get(bucket)) if bucket else None
+        if band and len(band) > 4 and band[4]:
+            return {"base": int(entry["expected"]), "q": band[4], "n": band[3], "from": "countdowns"}
+    # far-off live buses (40+ min) and untracked buses use this trip's own history
+    if entry["sched"] and hist and hist["observed"] >= MIN_RANGE_SAMPLES and hist.get("quantiles"):
+        return {"base": int(entry["sched"]), "q": hist["quantiles"], "n": hist["observed"], "from": "trip"}
+    return None
+
+
+def likely_range(dist):
+    """Middle 80% of the distribution: arrives in this window 8 times in 10."""
+    if not dist:
+        return None
+    return [dist["base"] + dist["q"][1], dist["base"] + dist["q"][17]]
+
+
+def probabilities(hist):
+    """Simple rates from this trip's history, only once there's enough of it."""
+    if not hist or hist["days"] < MIN_PROB_DAYS:
+        return None
+    out = {"days": hist["days"],
+           "cancelled": round(hist["cancelled"] / hist["days"], 3)}
+    if hist["observed"] >= MIN_PROB_DAYS and hist.get("on_time") is not None:
+        out["on_time"] = round(hist["on_time"] / hist["observed"], 3)
+        out["early"] = round(hist["early"] / hist["observed"], 3)
+    return out
 
 
 def apply_realtime(entry, tu, stop_id):
@@ -457,13 +543,15 @@ def tracking_for(trip_id, vehicle_id, vehicles_by_trip, vehicles_by_id, feed_ts,
     return {"status": status, "age": age, "vehicle": v["label"] or v["vehicle_id"] or None}
 
 
-def build_arrivals(stop_id, stop, static, feeds, now):
+def build_arrivals(stop_id, stop, static, feeds, now, stop_stats=None):
     tu_feed = feeds.get("trip_updates") or {"trip_updates": [], "timestamp": None}
     vp_feed = feeds.get("vehicle_positions") or {"vehicles": [], "timestamp": None}
     tu_by_trip = {t["trip"]["trip_id"]: t for t in tu_feed["trip_updates"] if t["trip"]}
     v_by_trip = {v["trip_id"]: v for v in vp_feed["vehicles"] if v["trip_id"]}
     v_by_id = {v["vehicle_id"]: v for v in vp_feed["vehicles"] if v["vehicle_id"]}
     routes = static["routes"]
+    stop_stats = stop_stats or {"trips": {}}
+    route_stats = static.get("route_stats") or {"routes": {}}
 
     entries = []
     for s in scheduled_trips(stop, static["calendar"], now):
@@ -484,7 +572,7 @@ def build_arrivals(stop_id, stop, static, feeds, now):
             route_id, headsign = load_trips()[trip_id]
         e = {"trip_id": trip_id, "sched": None, "seq": None, "route_id": route_id,
              "headsign": headsign, "expected": None, "source": "schedule",
-             "state": "running", "vehicle_id": tu["vehicle_id"]}
+             "state": "running", "vehicle_id": tu["vehicle_id"], "key": None}
         apply_realtime(e, tu, stop_id)
         if e["expected"] or e["state"] != "running":
             entries.append(e)
@@ -502,6 +590,7 @@ def build_arrivals(stop_id, stop, static, feeds, now):
             continue
         r = routes.get(e["route_id"], {})
         delay = e["expected"] - e["sched"] if e["expected"] and e["sched"] else None
+        hist = history_for(e["key"], stop_stats)
         out.append({
             "trip_id": e["trip_id"],
             "route_id": e["route_id"],
@@ -516,7 +605,13 @@ def build_arrivals(stop_id, stop, static, feeds, now):
             "state": e["state"],
             "tracking": tracking_for(e["trip_id"], e["vehicle_id"], v_by_trip, v_by_id,
                                      vp_feed.get("timestamp"), now),
+            "history": hist,
         })
+        if e["state"] == "running":
+            dist = arrival_distribution(e, hist, route_stats, now)
+            out[-1]["dist"] = dist
+            out[-1]["range"] = likely_range(dist)
+            out[-1]["prob"] = probabilities(hist)
     out.sort(key=lambda a: a["expected"] or a["scheduled"])
     return out[:MAX_RESULTS]
 
@@ -584,7 +679,8 @@ def lambda_handler(event, context):
             feed_errors.append(name)
             print(f"FEED ERROR {name}: {e}")
 
-    arrivals = build_arrivals(stop_id, stop, static, feeds, now)
+    stop_stats = load_stop_stats(stop_id)
+    arrivals = build_arrivals(stop_id, stop, static, feeds, now, stop_stats)
     route_ids = set(stop["routes"])
     trip_ids = {a["trip_id"] for a in arrivals}
     alerts = build_alerts(stop_id, route_ids, trip_ids, feeds.get("alerts"), now)
@@ -596,6 +692,7 @@ def lambda_handler(event, context):
         "feed_age": int(now - tu_ts) if tu_ts else None,
         "feed_errors": feed_errors,
         "schedule_valid_until": static["calendar"].get("feed_end"),
+        "history_days": stop_stats.get("days", 0),
         "arrivals": arrivals,
         "alerts": alerts,
     })

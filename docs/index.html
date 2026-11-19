@@ -7,7 +7,7 @@
   <meta name="description" content="Live Durham Region Transit arrivals that show when a bus is really tracking, cancelled, or schedule-only.">
   <meta name="theme-color" content="#0f3d3e">
   <link rel="icon" href="data:,">
-  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="style.css?v=5">
 </head>
 <body>
   <header class="top">
@@ -38,6 +38,8 @@
           <li><span class="dot stale"></span>Last seen: no position update for a few minutes</li>
           <li><span class="dot none"></span>Not tracking: showing the scheduled time</li>
         </ul>
+        <p>Under each bus you'll also see how that exact trip has done at your stop recently:
+          whether it was cancelled, left early, ran late, or only appeared on GPS at the last minute.</p>
       </div>
     </section>
 
@@ -51,6 +53,10 @@
         </div>
         <button id="star" class="icon" type="button" aria-pressed="false" aria-label="Save stop">&#9734;</button>
       </div>
+      <label class="walkrow">
+        <span>Your walk to this stop</span>
+        <select id="walk" aria-label="Your walk time to this stop"></select>
+      </label>
       <div id="alerts"></div>
       <ol id="arrivals" class="arrivals" aria-live="polite"></ol>
       <p id="status" class="hint"></p>
@@ -62,7 +68,7 @@
       Data: DRT open data (GTFS and GTFS-Realtime).</p>
   </footer>
 
-  <script src="config.js"></script>
-  <script src="app.js"></script>
+  <script src="config.js?v=5"></script>
+  <script src="app.js?v=5"></script>
 </body>
 </html>

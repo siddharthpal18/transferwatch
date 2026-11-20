@@ -57,6 +57,7 @@ STAT_FIELDS = ["days", "tracked", "cancelled", "skipped", "observed",
 MIN_PROB_DAYS = 5        # need this many days of a trip before showing its probabilities
 
 STOP_RE = re.compile(r"^[A-Za-z0-9_\-:.]{1,40}$")
+ROUTE_RE = re.compile(r"^[A-Za-z0-9_\-]{1,20}$")
 TRIP_CANCELLED = {3, 7}  # CANCELED, DELETED
 STU_SKIPPED, STU_NO_DATA = 1, 2
 
@@ -543,7 +544,15 @@ def tracking_for(trip_id, vehicle_id, vehicles_by_trip, vehicles_by_id, feed_ts,
     return {"status": status, "age": age, "vehicle": v["label"] or v["vehicle_id"] or None}
 
 
-def build_arrivals(stop_id, stop, static, feeds, now, stop_stats=None):
+def route_matches(route_id, routes, want):
+    """True if want is this route's short name (e.g. '902') or its route_id."""
+    if not want:
+        return True
+    want = want.lower()
+    return route_id.lower() == want or str(routes.get(route_id, {}).get("s", "")).lower() == want
+
+
+def build_arrivals(stop_id, stop, static, feeds, now, stop_stats=None, route=None):
     tu_feed = feeds.get("trip_updates") or {"trip_updates": [], "timestamp": None}
     vp_feed = feeds.get("vehicle_positions") or {"vehicles": [], "timestamp": None}
     tu_by_trip = {t["trip"]["trip_id"]: t for t in tu_feed["trip_updates"] if t["trip"]}
@@ -555,6 +564,8 @@ def build_arrivals(stop_id, stop, static, feeds, now, stop_stats=None):
 
     entries = []
     for s in scheduled_trips(stop, static["calendar"], now):
+        if not route_matches(s["route_id"], routes, route):
+            continue
         e = dict(s, expected=None, source="schedule", state="running")
         tu = tu_by_trip.get(s["trip_id"])
         if tu and not apply_realtime(e, tu, stop_id):
@@ -564,12 +575,19 @@ def build_arrivals(stop_id, stop, static, feeds, now, stop_stats=None):
 
     # Live-only trips (added trips, or trip IDs missing from our schedule)
     known = {e["trip_id"] for e in entries}
+    boards_here = {row[0] for row in stop["trips"]}     # trips riders can board at this stop
     for trip_id, tu in tu_by_trip.items():
         if trip_id in known or not any(u["stop_id"] == stop_id for u in tu["stops"]):
             continue
         route_id, headsign = tu["trip"]["route_id"], ""
         if trip_id in load_trips():
+            # A timetabled trip that isn't in this stop's boarding list only drops off here
+            # (e.g. it ends at this terminal), so riders can't catch it.
+            if trip_id not in boards_here:
+                continue
             route_id, headsign = load_trips()[trip_id]
+        if not route_matches(route_id, routes, route):
+            continue
         e = {"trip_id": trip_id, "sched": None, "seq": None, "route_id": route_id,
              "headsign": headsign, "expected": None, "source": "schedule",
              "state": "running", "vehicle_id": tu["vehicle_id"], "key": None}
@@ -663,6 +681,9 @@ def lambda_handler(event, context):
     stop_id = (params.get("stop") or "").strip()
     if not STOP_RE.match(stop_id):
         return respond(400, {"error": "Add ?stop=<stop_id> to the URL"})
+    route = (params.get("route") or "").strip() or None      # optional: only this route
+    if route and not ROUTE_RE.match(route):
+        return respond(400, {"error": "Invalid route"})
 
     now = time.time()
     static = load_static(now)
@@ -680,7 +701,7 @@ def lambda_handler(event, context):
             print(f"FEED ERROR {name}: {e}")
 
     stop_stats = load_stop_stats(stop_id)
-    arrivals = build_arrivals(stop_id, stop, static, feeds, now, stop_stats)
+    arrivals = build_arrivals(stop_id, stop, static, feeds, now, stop_stats, route)
     route_ids = set(stop["routes"])
     trip_ids = {a["trip_id"] for a in arrivals}
     alerts = build_alerts(stop_id, route_ids, trip_ids, feeds.get("alerts"), now)
@@ -688,6 +709,7 @@ def lambda_handler(event, context):
     tu_ts = (feeds.get("trip_updates") or {}).get("timestamp")
     return respond(200, {
         "stop_id": stop_id,
+        "route": route,
         "generated_at": int(now),
         "feed_age": int(now - tu_ts) if tu_ts else None,
         "feed_errors": feed_errors,

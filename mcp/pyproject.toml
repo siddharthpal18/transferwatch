@@ -1,0 +1,36 @@
+[project]
+name = "drt-mcp"
+version = "0.1.0"
+description = "MCP server for live Durham Region Transit buses, with arrival odds and leave-at times from TransferWatch"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+authors = [{ name = "Siddharth Pal" }]
+keywords = ["mcp", "transit", "gtfs-realtime", "durham", "ontario", "drt"]
+dependencies = [
+    "mcp>=2.3,<3",
+    "httpx>=0.27",
+    "tzdata; sys_platform == 'win32'",   # Windows has no built-in time zone database
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.23"]
+
+[project.scripts]
+drt-mcp = "drt_mcp.server:main"
+
+[project.urls]
+Homepage = "https://siddharthpal18.github.io/transferwatch/"
+Source = "https://github.com/siddharthpal18/transferwatch"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/drt_mcp"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]

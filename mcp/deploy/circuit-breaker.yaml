@@ -1,0 +1,240 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Flood protection for TransferWatch (drt-mcp and drt-live-api). If either Lambda is
+  invoked far more than normal, it is switched off automatically (reserved concurrency 0,
+  so further requests are throttled and not billed), you get an email, and it switches
+  back on by itself every morning. Uses only always-free AWS services.
+
+Parameters:
+  AlertEmail:
+    Type: String
+    Description: Email that gets "flood detected" and daily status alerts
+  McpFunctionName:
+    Type: String
+    Default: drt-mcp
+  ApiFunctionName:
+    Type: String
+    Default: drt-live-api
+  McpMaxPer5Min:
+    Type: Number
+    Default: 1500
+    Description: >
+      Trip drt-mcp above this many invocations in 5 minutes. A rider question is about
+      3-8 invocations, so 1500 is hundreds of questions in 5 minutes.
+  ApiMaxPer5Min:
+    Type: Number
+    Default: 3000
+    Description: >
+      Trip drt-live-api above this many invocations in 5 minutes. The website refreshes
+      every 30 s per open page, so 3000 is roughly 300 people watching at once.
+  ResetHourUtc:
+    Type: Number
+    Default: 9
+    MinValue: 0
+    MaxValue: 23
+    Description: Hour (UTC) to switch tripped functions back on. 9 UTC = 4 AM Toronto in winter.
+
+Resources:
+  AlarmTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: transferwatch-flood-alarm
+
+  AlarmTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics: [!Ref AlarmTopic]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowCloudWatchAlarms
+            Effect: Allow
+            Principal: { Service: cloudwatch.amazonaws.com }
+            Action: sns:Publish
+            Resource: !Ref AlarmTopic
+            Condition:
+              StringEquals: { "aws:SourceAccount": !Ref AWS::AccountId }
+
+  EmailSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref AlarmTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+
+  BreakerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: switch-protected-functions
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:PutFunctionConcurrency
+                  - lambda:DeleteFunctionConcurrency
+                  - lambda:GetFunctionConcurrency
+                Resource:
+                  - !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${McpFunctionName}
+                  - !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${ApiFunctionName}
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: !Ref AlarmTopic
+
+  BreakerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: transferwatch-breaker
+      Description: Switches flooded TransferWatch functions off, and back on each morning
+      Runtime: python3.13
+      Handler: index.handler
+      Timeout: 30
+      MemorySize: 128
+      Role: !GetAtt BreakerRole.Arn
+      Environment:
+        Variables:
+          PROTECTED: !Sub "${McpFunctionName},${ApiFunctionName}"
+          TOPIC_ARN: !Ref AlarmTopic
+      Code:
+        ZipFile: |
+          import json
+          import os
+
+          import boto3
+
+          lam = boto3.client("lambda")
+          sns = boto3.client("sns")
+          PROTECTED = [f for f in os.environ["PROTECTED"].split(",") if f]
+
+
+          def tripped_functions(event):
+              """Functions named in SNS messages for alarms that just went into ALARM."""
+              names = []
+              for rec in event.get("Records", []):
+                  try:
+                      msg = json.loads(rec["Sns"]["Message"])
+                  except (KeyError, ValueError):
+                      continue
+                  if msg.get("NewStateValue") != "ALARM":
+                      continue
+                  for dim in (msg.get("Trigger") or {}).get("Dimensions", []):
+                      if dim.get("name") == "FunctionName" and dim.get("value") in PROTECTED:
+                          names.append(dim["value"])
+              return names
+
+
+          def switch_off(name):
+              lam.put_function_concurrency(FunctionName=name, ReservedConcurrentExecutions=0)
+              print(f"TRIPPED: {name} switched off (reserved concurrency 0)")
+
+
+          def switch_back_on():
+              restored = []
+              for name in PROTECTED:
+                  try:
+                      cur = lam.get_function_concurrency(FunctionName=name).get("ReservedConcurrentExecutions")
+                  except lam.exceptions.ResourceNotFoundException:
+                      continue
+                  if cur == 0:                      # only undo what the breaker did
+                      lam.delete_function_concurrency(FunctionName=name)
+                      restored.append(name)
+                      print(f"RESET: {name} switched back on")
+              if restored:
+                  sns.publish(TopicArn=os.environ["TOPIC_ARN"],
+                              Subject="TransferWatch: functions switched back on",
+                              Message="Daily reset switched these back on: " + ", ".join(restored))
+              return restored
+
+
+          def handler(event, context):
+              if event.get("source") == "aws.events":           # daily schedule
+                  return {"restored": switch_back_on()}
+              names = tripped_functions(event)                    # SNS from an alarm
+              for name in names:
+                  switch_off(name)
+              return {"tripped": names}
+
+  BreakerSnsPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref BreakerFunction
+      Action: lambda:InvokeFunction
+      Principal: sns.amazonaws.com
+      SourceArn: !Ref AlarmTopic
+
+  BreakerSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref AlarmTopic
+      Protocol: lambda
+      Endpoint: !GetAtt BreakerFunction.Arn
+
+  McpFloodAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${McpFunctionName}-flood"
+      AlarmDescription: !Sub "${McpFunctionName} ran more than ${McpMaxPer5Min} times in 5 minutes. It has been switched off until the daily reset."
+      Namespace: AWS/Lambda
+      MetricName: Invocations
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref McpFunctionName
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: !Ref McpMaxPer5Min
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopic]
+
+  ApiFloodAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ApiFunctionName}-flood"
+      AlarmDescription: !Sub "${ApiFunctionName} ran more than ${ApiMaxPer5Min} times in 5 minutes. It has been switched off until the daily reset."
+      Namespace: AWS/Lambda
+      MetricName: Invocations
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref ApiFunctionName
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: !Ref ApiMaxPer5Min
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopic]
+
+  DailyReset:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Switch tripped TransferWatch functions back on each morning
+      ScheduleExpression: !Sub "cron(0 ${ResetHourUtc} * * ? *)"
+      State: ENABLED
+      Targets:
+        - Id: breaker
+          Arn: !GetAtt BreakerFunction.Arn
+
+  DailyResetPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref BreakerFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt DailyReset.Arn
+
+Outputs:
+  BreakerFunction:
+    Value: !Ref BreakerFunction
+  ManualOff:
+    Description: Switch drt-mcp off by hand (Lambda console > drt-mcp > Configuration > Concurrency > 0)
+    Value: !Sub "aws lambda put-function-concurrency --function-name ${McpFunctionName} --reserved-concurrent-executions 0"

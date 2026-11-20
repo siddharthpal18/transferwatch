@@ -14,7 +14,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pytest-asyncio>=0.23"]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "mangum>=0.17"]
+lambda = ["mangum>=0.17"]
 
 [project.scripts]
 drt-mcp = "drt_mcp.server:main"

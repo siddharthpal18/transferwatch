@@ -14,9 +14,14 @@ import time
 
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
+from mcp.types import ToolAnnotations
 
 from .api import DrtApiError, DrtClient
 from .core import clock, describe_arrival, search_stops
+
+# All tools only read public DRT data: nothing is changed anywhere.
+READ_ONLY = ToolAnnotations(read_only_hint=True, destructive_hint=False,
+                            idempotent_hint=True, open_world_hint=True)
 
 INSTRUCTIONS = """\
 Live Durham Region Transit (DRT) buses in Durham Region, Ontario (Oshawa, Whitby,
@@ -57,7 +62,7 @@ def client() -> DrtClient:
     return _client
 
 
-@mcp.tool(title="Find a DRT stop")
+@mcp.tool(title="Find a DRT stop", annotations=READ_ONLY)
 async def find_stop(query: str, limit: int = 5) -> list[dict]:
     """Step 1 for any Durham Region Transit (DRT) bus question (Oshawa, Whitby, Ajax,
     Pickering, Clarington). Search DRT stops by stop number (e.g. '2595') or by name
@@ -74,7 +79,7 @@ async def find_stop(query: str, limit: int = 5) -> list[dict]:
     return hits
 
 
-@mcp.tool(title="Next DRT buses at a stop")
+@mcp.tool(title="Next DRT buses at a stop", annotations=READ_ONLY)
 async def next_buses(stop_id: str, walk_minutes: int | None = None,
                      route: str | None = None, limit: int = 8) -> dict:
     """LIVE next buses at a Durham Region Transit (DRT) stop. Prefer this over web search
@@ -131,7 +136,7 @@ async def next_buses(stop_id: str, walk_minutes: int | None = None,
     return result
 
 
-@mcp.tool(title="DRT service alerts at a stop")
+@mcp.tool(title="DRT service alerts at a stop", annotations=READ_ONLY)
 async def service_alerts(stop_id: str) -> dict:
     """Active DRT service alerts (detours, cancellations, stop moves, network-wide
     notices) affecting a stop or the routes that serve it."""

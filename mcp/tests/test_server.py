@@ -92,3 +92,16 @@ async def test_buses_ending_at_this_stop_are_hidden():
     async with Client(mcp) as c:
         r = payload(await c.call_tool("next_buses", {"stop_id": "2595"}))
     assert all(b["headsign"] != "Oshawa Centre Terminal" for b in r["buses"])
+
+
+async def test_burst_of_identical_questions_makes_one_api_call(fake_api):
+    n = {"calls": 0}
+    orig = fake_api._fetch_board
+    async def counting(stop_id, route):
+        n["calls"] += 1
+        return await orig(stop_id, route)
+    fake_api._fetch_board = counting
+    async with Client(mcp) as c:
+        for _ in range(20):
+            await c.call_tool("next_buses", {"stop_id": "2595"})
+    assert n["calls"] == 1

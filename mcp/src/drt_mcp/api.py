@@ -10,6 +10,8 @@ DEFAULT_API_URL = "https://dciiu4vmtkjdzlevlz27de433q0kbwno.lambda-url.us-east-2
 DEFAULT_STOPS_URL = "https://siddharthpal18.github.io/transferwatch/data/stops.json"
 USER_AGENT = "drt-mcp/0.1 (TransferWatch MCP server)"
 STOPS_TTL = 6 * 3600
+BOARD_TTL = 15            # seconds: identical questions in a burst share one API call
+BOARD_CACHE_MAX = 200
 
 
 class DrtApiError(Exception):
@@ -25,6 +27,7 @@ class DrtClient:
                                        headers={"User-Agent": USER_AGENT})
         self._stops: list[dict] | None = None
         self._stops_at = 0.0
+        self._boards: dict[tuple[str, str | None], tuple[float, dict]] = {}
 
     async def stops(self) -> list[dict]:
         if self._stops is None or time.time() - self._stops_at > STOPS_TTL:
@@ -39,6 +42,17 @@ class DrtClient:
         return self._stops
 
     async def stop_board(self, stop_id: str, route: str | None = None) -> dict:
+        key = (stop_id, route)
+        hit = self._boards.get(key)
+        if hit and time.time() - hit[0] < BOARD_TTL:
+            return hit[1]
+        board = await self._fetch_board(stop_id, route)
+        if len(self._boards) >= BOARD_CACHE_MAX:
+            self._boards.clear()
+        self._boards[key] = (time.time(), board)
+        return board
+
+    async def _fetch_board(self, stop_id: str, route: str | None) -> dict:
         params = {"stop": stop_id}
         if route:
             params["route"] = route      # filtered before the API's 15-bus cap, so later buses aren't cut

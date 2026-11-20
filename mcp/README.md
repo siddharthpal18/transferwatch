@@ -74,6 +74,20 @@ npx -y @modelcontextprotocol/inspector drt-mcp
 drt-mcp --http --port 8000          # MCP endpoint at http://127.0.0.1:8000/mcp
 ```
 
+### Hosted on AWS Lambda (public URL for claude.ai, Desktop and mobile)
+
+`drt_mcp.lambda_app.handler` serves the same tools over stateless Streamable HTTP
+behind a Lambda Function URL. In Claude: **Customize → Connectors → Add custom
+connector**, and paste the URL ending in `/mcp`. No account or key needed.
+
+Build the deployment zip (Linux wheels, Python 3.13, x86_64):
+
+```bash
+pip install --target build --platform manylinux2014_x86_64 --implementation cp \
+    --python-version 3.13 --only-binary=:all: "mcp>=2.3,<3" httpx mangum tzdata
+cp -r src/drt_mcp build/ && (cd build && zip -qr ../drt-mcp-lambda.zip .)
+```
+
 ## Configuration
 
 | Variable | Default |

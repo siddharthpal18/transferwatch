@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Privacy · TransferWatch</title>
+  <meta name="description" content="Privacy policy for the TransferWatch web app and the DRT Transit MCP server.">
+  <meta name="theme-color" content="#0f3d3e">
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="style.css?v=5">
+  <style>
+    .policy h1 { font-size: 1.5rem; margin: 8px 0 4px; }
+    .policy h2 { font-size: 1.1rem; margin: 28px 0 6px; }
+    .policy p, .policy li { color: var(--ink); }
+    .policy .updated { color: var(--muted); font-size: .9rem; margin: 0 0 16px; }
+    .policy ul { padding-left: 20px; }
+    .policy li { margin: 4px 0; }
+    .policy code { background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 1px 5px; font-size: .9em; }
+    .policy a { color: var(--accent); }
+  </style>
+</head>
+<body>
+  <header class="top">
+    <a class="brand" href="./">
+      <span class="logo" aria-hidden="true"></span>
+      <span><strong>TransferWatch</strong><small>Never run for the bus again</small></span>
+    </a>
+  </header>
+
+  <main class="policy">
+    <h1>Privacy policy</h1>
+    <p class="updated">Last updated: November 20, 2026</p>
+
+    <p>TransferWatch is an independent project that shows live Durham Region Transit (DRT) bus
+    arrivals. It is not affiliated with DRT or the Regional Municipality of Durham. This policy
+    covers the TransferWatch website and the <strong>DRT Transit</strong> MCP server (the connector
+    you can add to Claude and other AI assistants).</p>
+
+    <p><strong>In short:</strong> there are no accounts, no sign-in, no cookies, no ads, no analytics,
+    and nothing is sold or shared. We never ask for your name, email, or location.</p>
+
+    <h2>What the DRT Transit connector receives</h2>
+    <p>When an assistant uses the connector, it sends only the tool inputs needed to answer a transit question:</p>
+    <ul>
+      <li>a stop search phrase (for example <code>Oshawa Centre</code>) or a stop ID,</li>
+      <li>optionally a route number (for example <code>902</code>),</li>
+      <li>optionally how many minutes you need to walk to the stop.</li>
+    </ul>
+    <p>The connector does not receive your conversation, your Claude account details, or your location.
+    Requests arrive from the assistant provider's servers, not from your device.</p>
+
+    <h2>How that information is used</h2>
+    <p>Tool inputs are used only to look up stops and live arrivals and to calculate when to leave.
+    The connector does not store your inputs, link them to you, or build any profile. Recent
+    arrival results for a stop are cached in memory for about 15 seconds so that repeated requests
+    don't overload the data feeds. Cached data contains bus information only.</p>
+
+    <h2>The website</h2>
+    <ul>
+      <li>Saved stops and walk times are stored only in your browser (<code>localStorage</code>).
+      They never leave your device, and clearing your browser data removes them.</li>
+      <li>"Stops near me" uses your browser's location permission. Your position is used on your
+      device to sort nearby stops and is never sent to our servers.</li>
+      <li>When you open a stop, your browser requests that stop's arrivals by stop ID.</li>
+    </ul>
+
+    <h2>Hosting and logs</h2>
+    <p>The website is hosted on GitHub Pages and the live data service runs on Amazon Web Services
+    (AWS Lambda). These providers may keep standard operational records such as request time,
+    duration, and errors, under their own privacy policies
+    (<a href="https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement">GitHub</a>,
+    <a href="https://aws.amazon.com/privacy/">AWS</a>). TransferWatch's own logs record service
+    errors only and are deleted automatically after 14 days.</p>
+
+    <h2>Data sources</h2>
+    <p>Schedules and real-time bus data come from DRT's public GTFS and GTFS-Realtime feeds.
+    Predictions may be wrong. Please allow extra time when it matters.</p>
+
+    <h2>Children</h2>
+    <p>The service collects no personal information from anyone, including children.</p>
+
+    <h2>Changes</h2>
+    <p>If this policy changes, the updated version will be posted on this page with a new date.</p>
+
+    <h2>Contact</h2>
+    <p>For questions or support, open an issue at
+    <a href="https://github.com/siddharthpal18/transferwatch/issues">github.com/siddharthpal18/transferwatch/issues</a>.</p>
+  </main>
+</body>
+</html>

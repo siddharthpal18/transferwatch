@@ -91,3 +91,19 @@ def test_search_ignores_and_and_maps_go_to_station():
     assert [s["stop_id"] for s in search_stops(stops, "Simcoe and Conlin")] == ["2712"]
     assert [s["stop_id"] for s in search_stops(stops, "Simcoe & Conlin")] == ["2712"]
     assert [s["stop_id"] for s in search_stops(stops, "Whitby GO")] == ["2576"]
+
+
+def test_search_handles_street_words_landmarks_and_extra_words():
+    from drt_mcp.core import search_stops
+    stops = [
+        {"id": "2712", "code": "2712", "name": "Simcoe Northbound @ Conlin"},
+        {"id": "698", "code": "698", "name": "Ontario Tech / Durham College North Campus"},
+        {"id": "b12", "code": "b12", "name": "Pickering Parkway Terminal Platform B12"},
+        {"id": "2576", "code": "2576", "name": "Whitby Station"},
+    ]
+    first = lambda q: (search_stops(stops, q) or [{}])[0].get("stop_id")
+    assert first("Simcoe St N & Conlin Rd") == "2712"
+    assert first("Ontario Tech University") == "698"
+    assert first("UOIT") == "698"
+    assert first("Pickering Town Centre") == "b12"
+    assert search_stops(stops, "Toronto Union Station") == []

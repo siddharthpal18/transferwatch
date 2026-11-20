@@ -45,10 +45,30 @@ def pct(p: float) -> str:
 
 _WORD = re.compile(r"[a-z0-9]+")
 # words people type that never appear in stop names ('Simcoe and Conlin', 'King @ Simcoe')
-_STOPWORDS = {"and", "at", "the", "of", "stop", "near", "by", "on"}
+_STOPWORDS = {"and", "at", "the", "of", "stop", "near", "by", "on", "bus", "drt"}
+# street types and directions: DRT names leave them out ('Simcoe Northbound @ Conlin'),
+# so they count when present but are never required ('Simcoe St N & Conlin Rd')
+_OPTIONAL = {"st", "street", "rd", "road", "ave", "av", "avenue", "dr", "drive", "blvd",
+             "boulevard", "cres", "crescent", "ct", "court", "pkwy", "parkway", "hwy",
+             "highway", "ln", "lane", "way", "n", "s", "e", "w", "north", "south", "east",
+             "west", "nb", "sb", "eb", "wb"}
 # what riders say -> words DRT uses in stop names
+# landmark names riders use -> how DRT names the stop
+_PHRASES = {
+    "pickering town centre": "pickering parkway terminal",
+    "pickering town center": "pickering parkway terminal",
+    "ptc": "pickering parkway terminal",
+    "uoit": "ontario tech",
+    "oshawa centre mall": "oshawa centre terminal",
+    "scarborough town centre": "scarborough centre station",
+    "stc": "scarborough centre station",
+}
 _ALIASES = {
     "go": {"go", "station"},
+    "center": {"centre", "center"},
+    "n": {"n", "north", "northbound"}, "s": {"s", "south", "southbound"},
+    "e": {"e", "east", "eastbound"}, "w": {"w", "west", "westbound"},
+    "nb": {"northbound"}, "sb": {"southbound"}, "eb": {"eastbound"}, "wb": {"westbound"},
     "stn": {"station"},
     "term": {"terminal"},
 }
@@ -82,17 +102,30 @@ def search_stops(stops: list[dict], query: str, limit: int = 5) -> list[dict]:
     if exact:
         return [_stop_summary(s) for s in exact[:limit]]
 
+    for phrase, name in _PHRASES.items():
+        q = re.sub(rf"\b{re.escape(phrase)}\b", name, q)
     words = [w for w in _tokens(q) if w not in _STOPWORDS] or _tokens(q)
     if not words:
         return []
+    required = [w for w in words if w not in _OPTIONAL] or words
+    optional = [w for w in words if w in _OPTIONAL and w not in required]
     scored = []
     for s in stops:
         name = s.get("name", "")
         tokens = _tokens(name)
-        hits = [_word_hits(w, tokens) for w in words]
+        hits = [_word_hits(w, tokens) for w in required]
         if all(hits):
+            bonus = sum(_word_hits(w, tokens) for w in optional)
             # exact words first, then shorter names ('Oshawa Centre Terminal' before '... Platform 12')
-            scored.append((-sum(hits), len(name), name, s))
+            scored.append((-(sum(hits) + bonus), len(name), name, s))
+    if not scored and len(required) >= 3:
+        # nothing has every word ('Ontario Tech University'): take stops missing just one
+        for s in stops:
+            name = s.get("name", "")
+            tokens = _tokens(name)
+            hits = [_word_hits(w, tokens) for w in required]
+            if sum(1 for h in hits if h) >= len(required) - 1:
+                scored.append((-sum(hits), len(name), name, s))
     scored.sort(key=lambda x: x[:3])
     return [_stop_summary(x[3]) for x in scored[:limit]]
 
@@ -163,9 +196,11 @@ def here_by(a: dict) -> list[dict]:
 
 def plan(a: dict, walk_minutes: int, now: float) -> dict | None:
     """When to leave home, given the rider's walk to the stop. Mirrors planLine() in app.js."""
-    if a.get("state") != "running" or not a.get("dist") or not walk_minutes:
+    if a.get("state") != "running" or walk_minutes is None:
         return None
     w = walk_minutes * 60
+    if not a.get("dist"):
+        return _plan_from_time(a, w, now)
     now_chance = catch_chance(a, now + w)
     by90 = leave_by(a, w)
     if by90 and by90 > now + 60:
@@ -181,6 +216,27 @@ def plan(a: dict, walk_minutes: int, now: float) -> dict | None:
         "kind": kind,
         "leave_at": clock(by90) if kind == "leave_at" else None,
         "chance_if_you_leave_now": pct(now_chance),
+    }
+
+
+def _plan_from_time(a: dict, w: float, now: float) -> dict | None:
+    """No odds history for this bus: plan on DRT's time with a 2-minute safety margin."""
+    when = a.get("expected") or a.get("scheduled")
+    if not when:
+        return None
+    leave = when - w - 120
+    if leave > now + 60:
+        advice, kind = f"Leave at {clock(leave)}", "leave_at"
+    elif when - now >= w:
+        advice, kind = "Leave now", "leave_now"
+    else:
+        advice, kind = "Too late for this one", "too_late"
+    return {
+        "advice": advice,
+        "kind": kind,
+        "leave_at": clock(leave) if kind == "leave_at" else None,
+        "chance_if_you_leave_now": None,
+        "based_on": "DRT's predicted time plus a 2-minute margin (no odds history for this bus yet)",
     }
 
 
@@ -268,7 +324,7 @@ def describe_arrival(a: dict, now: float, walk_minutes: int | None = None) -> di
     else:
         out["here_by"] = None
         out["odds_note"] = "Not enough history for odds on this bus yet"
-    if walk_minutes:
+    if walk_minutes is not None:
         out["plan"] = plan(a, walk_minutes, now)
     notes = history_notes(a)
     if notes:

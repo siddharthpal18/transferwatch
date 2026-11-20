@@ -9,6 +9,7 @@ Run as a web server (remote clients):                   drt-mcp --http --port 80
 from __future__ import annotations
 
 import argparse
+import re
 import logging
 import time
 
@@ -20,27 +21,24 @@ from .api import DrtApiError, DrtClient
 from .core import clock, describe_arrival, search_stops
 
 # All tools only read public DRT data: nothing is changed anywhere.
-READ_ONLY = ToolAnnotations(read_only_hint=True, destructive_hint=False,
-                            idempotent_hint=True, open_world_hint=True)
+def read_only(title: str) -> ToolAnnotations:
+    return ToolAnnotations(title=title, read_only_hint=True, destructive_hint=False,
+                           idempotent_hint=True, open_world_hint=True)
 
 INSTRUCTIONS = """\
-Live Durham Region Transit (DRT) buses in Durham Region, Ontario (Oshawa, Whitby,
+Live Durham Region Transit (DRT) bus data for Durham Region, Ontario (Oshawa, Whitby,
 Ajax, Pickering, Clarington and more), from the independent TransferWatch project.
 Not affiliated with DRT.
 
-Use these tools for ANY question about DRT buses, departures, delays or when to leave,
-instead of web search: they return live GPS positions and real-time predictions, while
-web pages only have the printed timetable.
+Data comes from DRT's real-time feeds (GPS positions and live predictions), not the
+printed timetable. Stops are identified by stop_id.
 
-Workflow: call find_stop first to get a stop_id, then next_buses.
-
-What makes this server different: besides DRT's own predicted time, each bus can
-carry 'here_by' odds learned from weeks of DRT's past predictions versus when buses
-actually came (e.g. 50% by 6:37, 80% by 6:38, 95% by 6:40). If the rider tells you
-their walk time to the stop, pass walk_minutes and use the returned 'plan' to say
-when to leave. Prefer the 80% or 95% time over 'drt_says' when the rider can't
-afford to miss the bus. Mention 'history_notes' when present: they describe how this
-exact trip behaved on recent days (cancelled, left early, not on GPS)."""
+Field meanings: 'drt_says' is DRT's own predicted arrival time. 'here_by' gives the
+chance the bus has reached the stop by each listed time (e.g. 50% by 6:37, 80% by
+6:38, 95% by 6:40), learned from weeks of DRT's past predictions compared with actual
+arrivals. 'plan' (present when walk_minutes is given) is the latest departure time
+for a 90% chance of catching the bus. 'history_notes' describe how the same trip
+behaved on recent days (cancelled, left early, not on GPS)."""
 
 mcp = MCPServer(
     name="drt-transit",
@@ -55,6 +53,19 @@ logging.getLogger("httpx").setLevel(logging.WARNING)   # one log line per reques
 _client: DrtClient | None = None
 
 
+_STOP_ID = re.compile(r"^[A-Za-z0-9_\-]{1,20}$")
+_ROUTE = re.compile(r"^[A-Za-z0-9_\-]{1,20}$")
+
+
+def clean_stop_id(stop_id: str) -> str:
+    stop_id = (stop_id or "").strip().lstrip("#")
+    if not stop_id:
+        raise ToolError("stop_id is required: the DRT stop number shown on the stop sign, e.g. '2595'.")
+    if not _STOP_ID.match(stop_id):
+        raise ToolError(f"'{stop_id[:40]}' is not a DRT stop ID. Stop IDs are short numbers like '2595'.")
+    return stop_id
+
+
 def client() -> DrtClient:
     global _client
     if _client is None:
@@ -62,12 +73,12 @@ def client() -> DrtClient:
     return _client
 
 
-@mcp.tool(title="Find a DRT stop", annotations=READ_ONLY)
+@mcp.tool(title="Find a DRT stop", annotations=read_only("Find a DRT stop"))
 async def find_stop(query: str, limit: int = 5) -> list[dict]:
-    """Step 1 for any Durham Region Transit (DRT) bus question (Oshawa, Whitby, Ajax,
-    Pickering, Clarington). Search DRT stops by stop number (e.g. '2595') or by name
-    (e.g. 'Oshawa Centre', 'Simcoe and King', 'Whitby GO'). Returns stop_id, the stop
-    number printed on the sign, the name, the routes serving it and its location."""
+    """Search Durham Region Transit (DRT) stops in Oshawa, Whitby, Ajax, Pickering and
+    Clarington by stop number (e.g. '2595') or by name (e.g. 'Oshawa Centre',
+    'Simcoe and King', 'Whitby GO'). Returns each stop's stop_id, the stop number
+    printed on the sign, its name, the routes serving it and its location."""
     try:
         stops = await client().stops()
     except DrtApiError as e:
@@ -79,33 +90,40 @@ async def find_stop(query: str, limit: int = 5) -> list[dict]:
     return hits
 
 
-@mcp.tool(title="Next DRT buses at a stop", annotations=READ_ONLY)
+@mcp.tool(title="Next DRT buses at a stop", annotations=read_only("Next DRT buses at a stop"))
 async def next_buses(stop_id: str, walk_minutes: int | None = None,
                      route: str | None = None, limit: int = 8) -> dict:
-    """LIVE next buses at a Durham Region Transit (DRT) stop. Prefer this over web search
-    for any DRT departure question: it has real-time predictions and GPS, not just the
-    printed timetable. Covers the coming 90 minutes, with DRT's predicted time,
-    delay, whether the bus is live on GPS, and TransferWatch's 'here_by' odds
-    (chance the bus has reached the stop by each time).
+    """Live upcoming buses at a Durham Region Transit (DRT) stop for the next 90
+    minutes, from DRT's real-time feeds. For each bus: DRT's predicted time, delay,
+    whether it is live on GPS, and TransferWatch's 'here_by' odds (the chance the bus
+    has reached the stop by each time).
 
     Args:
-        stop_id: from find_stop.
-        walk_minutes: the rider's walk from where they are to the stop. When given,
-            each bus gets a 'plan' with when to leave for a 90% chance of catching it.
+        stop_id: the DRT stop ID (the stop number shown on the stop sign).
+        walk_minutes: the rider's walking time to the stop. When given, each bus
+            includes a 'plan' with the latest departure time for a 90% chance of
+            catching it.
         route: only this route, e.g. '302' or '915'.
         limit: maximum number of buses to return (1-15).
     """
-    route = route.strip() if route else None
+    stop_id = clean_stop_id(stop_id)
+    route = route.strip() if route and route.strip() else None
+    if route and not _ROUTE.match(route):
+        raise ToolError(f"'{route[:40]}' is not a DRT route. Routes look like '902', '302' or 'N2'.")
+    if walk_minutes is not None and not 0 <= walk_minutes <= 120:
+        raise ToolError("walk_minutes must be between 0 and 120.")
     try:
-        board = await client().stop_board(stop_id.strip(), route)
+        board = await client().stop_board(stop_id, route)
     except DrtApiError as e:
         raise ToolError(str(e)) from e
 
-    stop_name = None
+    stop = None
     try:
-        stop_name = next((s["name"] for s in await client().stops() if s.get("id") == stop_id), None)
+        stop = next((s for s in await client().stops() if s.get("id") == stop_id), None)
     except DrtApiError:
         pass
+    stop_name = stop.get("name") if stop else None
+    stop_routes = [str(r) for r in (stop.get("routes") or [])] if stop else []
 
     now = time.time()
     arrivals = board.get("arrivals") or []
@@ -126,8 +144,12 @@ async def next_buses(stop_id: str, walk_minutes: int | None = None,
         "history_days": board.get("history_days", 0),
     }
     if not buses:
-        result["note"] = ("No buses in the next 90 minutes" + (f" on route {route}" if route else "")
-                          + ". Service may have ended for the day.")
+        if route and stop_routes and route.lower() not in (r.lower() for r in stop_routes):
+            result["note"] = (f"Route {route} does not serve this stop. "
+                              f"Routes here: {', '.join(stop_routes)}.")
+        else:
+            result["note"] = ("No buses in the next 90 minutes" + (f" on route {route}" if route else "")
+                              + ". Service may have ended for the day.")
     if board.get("feed_errors"):
         result["warning"] = ("Some live DRT feeds were unreachable "
                              f"({', '.join(board['feed_errors'])}), so times may be timetable only.")
@@ -136,12 +158,13 @@ async def next_buses(stop_id: str, walk_minutes: int | None = None,
     return result
 
 
-@mcp.tool(title="DRT service alerts at a stop", annotations=READ_ONLY)
+@mcp.tool(title="DRT service alerts at a stop", annotations=read_only("DRT service alerts at a stop"))
 async def service_alerts(stop_id: str) -> dict:
     """Active DRT service alerts (detours, cancellations, stop moves, network-wide
     notices) affecting a stop or the routes that serve it."""
     try:
-        board = await client().stop_board(stop_id.strip())
+        stop_id = clean_stop_id(stop_id)
+        board = await client().stop_board(stop_id)
     except DrtApiError as e:
         raise ToolError(str(e)) from e
     alerts = [{k: a.get(k) for k in ("header", "description", "effect", "cause", "url") if a.get(k)}

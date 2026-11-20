@@ -67,7 +67,7 @@ async def test_empty_stop_and_feed_warning():
 async def test_unknown_stop_is_tool_error():
     async with Client(mcp) as c:
         r = await c.call_tool("next_buses", {"stop_id": "99999999"})
-    assert r.is_error and "find_stop" in r.content[0].text
+    assert r.is_error and "Unknown DRT stop" in r.content[0].text
 
 
 async def test_service_alerts():
@@ -105,3 +105,51 @@ async def test_burst_of_identical_questions_makes_one_api_call(fake_api):
         for _ in range(20):
             await c.call_tool("next_buses", {"stop_id": "2595"})
     assert n["calls"] == 1
+
+
+# --- regressions from the live stress test (2026-11-20) ---
+
+async def test_stop_id_with_spaces_or_hash_still_finds_the_stop():
+    async with Client(mcp) as c:
+        r = payload(await c.call_tool("next_buses", {"stop_id": " #2595 "}))
+    assert r["stop_id"] == "2595" and r["stop_name"] == "Oshawa Centre Terminal"
+
+
+async def test_bad_stop_ids_get_a_clear_error_not_http_400():
+    async with Client(mcp) as c:
+        for bad in ["", "   ", "../../etc/passwd", "2595; rm -rf /"]:
+            for tool in ("next_buses", "service_alerts"):
+                r = await c.call_tool(tool, {"stop_id": bad})
+                assert r.is_error, (tool, bad)
+                assert "HTTP 400" not in r.content[0].text
+                assert "stop" in r.content[0].text.lower()
+
+
+async def test_bad_route_gets_a_clear_error():
+    async with Client(mcp) as c:
+        r = await c.call_tool("next_buses", {"stop_id": "2595", "route": "902; rm -rf /"})
+    assert r.is_error and "not a DRT route" in r.content[0].text
+
+
+async def test_route_that_does_not_serve_the_stop_says_so():
+    async with Client(mcp) as c:
+        r = payload(await c.call_tool("next_buses", {"stop_id": "2595", "route": "999"}))
+    assert r["buses"] == []
+    assert "does not serve this stop" in r["note"] and "302" in r["note"]
+
+
+async def test_walk_minutes_out_of_range_is_rejected():
+    async with Client(mcp) as c:
+        for bad in (-10, 500):
+            r = await c.call_tool("next_buses", {"stop_id": "2595", "walk_minutes": bad})
+            assert r.is_error and "walk_minutes" in r.content[0].text
+
+
+async def test_walk_zero_and_buses_without_odds_still_get_a_plan():
+    async with Client(mcp) as c:
+        at_stop = payload(await c.call_tool("next_buses", {"stop_id": "2595", "walk_minutes": 0}))
+        walking = payload(await c.call_tool("next_buses", {"stop_id": "2595", "walk_minutes": 5}))
+    assert all(b["plan"] is not None for b in at_stop["buses"] if b["status"] == "running")
+    no_odds = [b for b in walking["buses"] if b["here_by"] is None and b["status"] == "running"]
+    assert no_odds and no_odds[0]["plan"]["kind"] == "leave_at"
+    assert "2-minute margin" in no_odds[0]["plan"]["based_on"]

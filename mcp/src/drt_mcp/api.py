@@ -61,7 +61,7 @@ class DrtClient:
         except httpx.HTTPError as e:
             raise DrtApiError(f"The TransferWatch API didn't respond: {e}") from e
         if r.status_code == 404:
-            raise DrtApiError(f"Unknown DRT stop '{stop_id}'. Use find_stop to look up the stop ID.")
+            raise DrtApiError(f"Unknown DRT stop '{stop_id}'. Check the stop number on the sign or search stops by name.")
         if r.status_code >= 400:
             raise DrtApiError(f"The TransferWatch API returned HTTP {r.status_code}.")
         try:

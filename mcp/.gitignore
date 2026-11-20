@@ -3,5 +3,3 @@ __pycache__/
 .pytest_cache/
 .venv/
 dist/
-out.txt
-live_check.py

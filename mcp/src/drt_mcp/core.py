@@ -11,6 +11,7 @@ meaning: the bus reaches the stop by base + q[i] with probability (i + 1) / 20.
 """
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -42,11 +43,37 @@ def pct(p: float) -> str:
 # ---------------------------------------------------------------------------
 # Stop search
 
+_WORD = re.compile(r"[a-z0-9]+")
+# words people type that never appear in stop names ('Simcoe and Conlin', 'King @ Simcoe')
+_STOPWORDS = {"and", "at", "the", "of", "stop", "near", "by", "on"}
+# what riders say -> words DRT uses in stop names
+_ALIASES = {
+    "go": {"go", "station"},
+    "stn": {"station"},
+    "term": {"terminal"},
+}
+
+
+def _tokens(text: str) -> list[str]:
+    return _WORD.findall(text.lower())
+
+
+def _word_hits(word: str, tokens: list[str]) -> int:
+    """2 = exact word match, 1 = prefix match ('cent' -> 'centre'), 0 = no match."""
+    options = _ALIASES.get(word, {word})
+    if any(t in options for t in tokens):
+        return 2
+    if len(word) >= 3 and any(t.startswith(word) for t in tokens):
+        return 1
+    return 0
+
+
 def search_stops(stops: list[dict], query: str, limit: int = 5) -> list[dict]:
     """
     Find stops by stop number or name. An exact stop number match wins; otherwise
-    every word of the query must appear in the stop name ('oshawa centre' matches
-    'Oshawa Centre Terminal Platform 3').
+    every meaningful word of the query must match a whole word (or the start of a
+    word, for 3+ letters) in the stop name, in any order: 'simcoe and conlin'
+    matches 'Simcoe Northbound @ Conlin', 'whitby go' matches 'Whitby Station'.
     """
     q = query.strip().lower().lstrip("#")
     if not q:
@@ -55,11 +82,19 @@ def search_stops(stops: list[dict], query: str, limit: int = 5) -> list[dict]:
     if exact:
         return [_stop_summary(s) for s in exact[:limit]]
 
-    words = q.split()
-    hits = [s for s in stops if all(w in s.get("name", "").lower() for w in words)]
-    # shorter names first: 'Oshawa Centre Terminal' before 'Oshawa Centre Terminal Platform 12'
-    hits.sort(key=lambda s: (len(s.get("name", "")), s.get("name", "")))
-    return [_stop_summary(s) for s in hits[:limit]]
+    words = [w for w in _tokens(q) if w not in _STOPWORDS] or _tokens(q)
+    if not words:
+        return []
+    scored = []
+    for s in stops:
+        name = s.get("name", "")
+        tokens = _tokens(name)
+        hits = [_word_hits(w, tokens) for w in words]
+        if all(hits):
+            # exact words first, then shorter names ('Oshawa Centre Terminal' before '... Platform 12')
+            scored.append((-sum(hits), len(name), name, s))
+    scored.sort(key=lambda x: x[:3])
+    return [_stop_summary(x[3]) for x in scored[:limit]]
 
 
 def _stop_summary(s: dict) -> dict:

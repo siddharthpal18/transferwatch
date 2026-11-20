@@ -87,3 +87,48 @@ def test_two_cold_calls_in_a_row():
     for i in range(2):
         status, body = call(rpc(10 + i, "tools/call", {"name": "find_stop", "arguments": {"query": "whitby go"}}))
         assert status == 200 and not body["result"].get("isError")
+
+
+@pytest.mark.parametrize("method,path,status", [
+    ("GET", "/mcp", 405),        # browser visit or SSE stream request: must not hang
+    ("DELETE", "/mcp", 405),
+    ("GET", "/", 404),
+    ("GET", "/favicon.ico", 404),
+    ("POST", "/other", 404),
+])
+def test_non_mcp_requests_are_answered_instantly(method, path, status):
+    import time
+    ev = url_event({}, method, path)
+    ev["body"] = None
+    t = time.perf_counter()
+    resp = handler(ev, FakeContext())
+    assert resp["statusCode"] == status
+    assert time.perf_counter() - t < 0.05
+
+
+def test_trailing_slash_still_reaches_mcp():
+    status, body = call_path(rpc(20, "tools/list"), "/mcp/")
+    assert status == 200 and len(body["result"]["tools"]) == 3
+
+
+def call_path(body, path):
+    resp = handler(url_event(body, "POST", path), FakeContext())
+    return resp["statusCode"], json.loads(resp["body"])
+
+
+
+def test_api_key_when_configured(monkeypatch):
+    monkeypatch.setenv("MCP_API_KEY", "s3cret-key")
+    no_key = handler(url_event(rpc(30, "tools/list")), FakeContext())
+    assert no_key["statusCode"] == 401
+    ev = url_event(rpc(31, "tools/list"))
+    ev["headers"]["X-Api-Key"] = "wrong"
+    assert handler(ev, FakeContext())["statusCode"] == 401
+    ev["headers"]["X-Api-Key"] = "s3cret-key"
+    ok = handler(ev, FakeContext())
+    assert ok["statusCode"] == 200 and len(json.loads(ok["body"])["result"]["tools"]) == 3
+
+
+def test_no_key_configured_means_public(monkeypatch):
+    monkeypatch.delenv("MCP_API_KEY", raising=False)
+    assert handler(url_event(rpc(32, "tools/list")), FakeContext())["statusCode"] == 200

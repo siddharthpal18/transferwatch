@@ -79,3 +79,15 @@ def test_matches_website_math():
         assert cdf(c["a"]["dist"], c["t"]) == pytest.approx(j_cdf)
         assert catch_chance(c["a"], c["t"]) == pytest.approx(j_catch)
         assert leave_by(c["a"], c["w"], 0.9) == j_leave
+
+
+def test_search_ignores_and_and_maps_go_to_station():
+    from drt_mcp.core import search_stops
+    stops = [
+        {"id": "2712", "code": "2712", "name": "Simcoe Northbound @ Conlin"},
+        {"id": "2576", "code": "2576", "name": "Whitby Station"},
+        {"id": "61", "code": "61", "name": "Gordon Northbound @ Whitby Shores Greenway"},
+    ]
+    assert [s["stop_id"] for s in search_stops(stops, "Simcoe and Conlin")] == ["2712"]
+    assert [s["stop_id"] for s in search_stops(stops, "Simcoe & Conlin")] == ["2712"]
+    assert [s["stop_id"] for s in search_stops(stops, "Whitby GO")] == ["2576"]
